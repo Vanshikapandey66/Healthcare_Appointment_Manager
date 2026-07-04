@@ -1,20 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-
-# Virtual Environment
 venv/
-backend/venv/
-
-# Environment variables
+__pycache__/
+*.pyc
+db.sqlite3
 .env
-
-# VS Code
-.vscode/
-
-# Frontend
-node_modules/
-dist/
-build/
+credentials.json
+frontend/
