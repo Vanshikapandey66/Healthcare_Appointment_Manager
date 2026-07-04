@@ -1,5 +1,7 @@
 from django.db import models
 from django.core.exceptions import ValidationError
+from django.utils import timezone
+
 from patients.models import PatientProfile
 from appointments.models import Appointment
 from doctors.models import Specialization
@@ -7,9 +9,11 @@ from doctors.models import Specialization
 
 class AIInteraction(models.Model):
     INTERACTION_CHOICES = (
+        ("general_chat", "General Chat"),
         ("pre_visit", "Pre Visit"),
         ("post_visit", "Post Visit"),
         ("follow_up", "Follow Up"),
+        ("specialist_recommendation", "Specialist Recommendation"),
     )
 
     STATUS_CHOICES = (
@@ -40,7 +44,7 @@ class AIInteraction(models.Model):
     )
 
     interaction_type = models.CharField(
-        max_length=20,
+        max_length=50,
         choices=INTERACTION_CHOICES
     )
 
@@ -112,20 +116,25 @@ class AIInteraction(models.Model):
 
     def clean(self):
 
-        # Edge Case 1: Empty input
+        # Edge Case 1
+        if self.patient.user.role != "patient":
+            raise ValidationError(
+                "Only patients can use AI assistant."
+            )
+
+        # Edge Case 2
         if not self.input_text.strip():
             raise ValidationError(
                 "Input text cannot be empty."
             )
 
-        # Edge Case 2: Very large prompt
+        # Edge Case 3
         if len(self.input_text) > 5000:
             raise ValidationError(
-                "Input text exceeds maximum allowed length."
+                "Input text exceeds maximum length."
             )
 
-        # Edge Case 3:
-        # Post visit must have appointment
+        # Edge Case 4
         if (
             self.interaction_type == "post_visit"
             and not self.appointment
@@ -134,28 +143,72 @@ class AIInteraction(models.Model):
                 "Post-visit interaction requires appointment."
             )
 
-        # Edge Case 4:
-        # Wrong patient-appointment mapping
+        # Edge Case 5
         if (
             self.appointment
             and self.appointment.patient != self.patient
         ):
             raise ValidationError(
-                "Appointment does not belong to this patient."
+                "Appointment does not belong to patient."
             )
 
-        # Edge Case 5:
-        # Completed but no output
+        # Edge Case 6
+        if (
+            self.interaction_type == "pre_visit"
+            and not self.symptoms
+        ):
+            raise ValidationError(
+                "Pre-visit requires symptoms."
+            )
+
+        # Edge Case 7
+        if (
+            self.interaction_type
+            == "specialist_recommendation"
+            and not self.symptoms
+        ):
+            raise ValidationError(
+                "Specialist recommendation requires symptoms."
+            )
+
+        # Edge Case 8
+        if self.symptoms and len(self.symptoms) > 1000:
+            raise ValidationError(
+                "Symptoms too large."
+            )
+
+        # Edge Case 9
+        if (
+            self.interaction_type == "post_visit"
+            and self.appointment
+            and self.appointment.status == "cancelled"
+        ):
+            raise ValidationError(
+                "Cancelled appointment invalid."
+            )
+
+        # Edge Case 10
+        if (
+            self.interaction_type == "post_visit"
+            and self.appointment
+        ):
+            slot_date = self.appointment.slot.date
+
+            if slot_date > timezone.localdate():
+                raise ValidationError(
+                    "Post-visit not allowed before appointment."
+                )
+
+        # Edge Case 11
         if (
             self.status == "completed"
             and not self.output_text
         ):
             raise ValidationError(
-                "Completed interaction must have output."
+                "Completed interaction requires output."
             )
 
-        # Edge Case 6:
-        # Pending but output exists
+        # Edge Case 12
         if (
             self.status == "pending"
             and self.output_text
@@ -164,35 +217,31 @@ class AIInteraction(models.Model):
                 "Pending interaction cannot have output."
             )
 
-        # Edge Case 7:
-        # Failed but no error
+        # Edge Case 13
         if (
             self.status == "failed"
             and not self.error_message
         ):
             raise ValidationError(
-                "Failed interaction must store error message."
+                "Failed interaction requires error message."
             )
 
-        # Edge Case 8:
-        # Retry overflow
+        # Edge Case 14
         if self.retry_count > 3:
             raise ValidationError(
                 "Retry count cannot exceed 3."
             )
 
-        # Edge Case 9:
-        # Pending with token count
+        # Edge Case 15
         if (
             self.status == "pending"
             and self.tokens_used
         ):
             raise ValidationError(
-                "Pending interaction cannot have token usage."
+                "Pending interaction cannot have token count."
             )
 
-        # Edge Case 10:
-        # Completed must have model name
+        # Edge Case 16
         if (
             self.status == "completed"
             and not self.model_name
@@ -201,28 +250,25 @@ class AIInteraction(models.Model):
                 "Completed interaction must store model name."
             )
 
-        # Edge Case 11:
-        # Completed must have completed_at
+        # Edge Case 17
         if (
             self.status == "completed"
             and not self.completed_at
         ):
             raise ValidationError(
-                "Completed interaction must have completion time."
+                "Completed interaction needs completed_at."
             )
 
-        # Edge Case 12:
-        # Pending cannot have completed_at
+        # Edge Case 18
         if (
             self.status == "pending"
             and self.completed_at
         ):
             raise ValidationError(
-                "Pending interaction cannot have completion time."
+                "Pending interaction cannot have completed_at."
             )
 
-        # Edge Case 13:
-        # Failed cannot have output
+        # Edge Case 19
         if (
             self.status == "failed"
             and self.output_text
@@ -231,19 +277,17 @@ class AIInteraction(models.Model):
                 "Failed interaction cannot have output."
             )
 
-        # Edge Case 14:
-        # completed_at before creation
+        # Edge Case 20
         if (
             self.completed_at
             and self.created_at
             and self.completed_at < self.created_at
         ):
             raise ValidationError(
-                "Completion time cannot be before creation time."
+                "Completion time invalid."
             )
 
-        # Edge Case 15:
-        # Duplicate active requests
+        # Edge Case 21
         active_requests = AIInteraction.objects.filter(
             patient=self.patient,
             interaction_type=self.interaction_type,
@@ -252,44 +296,53 @@ class AIInteraction(models.Model):
 
         if active_requests.exists():
             raise ValidationError(
-                "Another pending AI request already exists."
+                "Another pending request already exists."
             )
 
-        # Edge Case 16:
-        # Symptoms too large
-        if self.symptoms and len(self.symptoms) > 1000:
-            raise ValidationError(
-                "Symptoms field too large."
-            )
-
-        # Edge Case 17:
-        # Emergency should recommend specialization
+        # Edge Case 22
         if (
             self.urgency_level == "emergency"
-            and not self.recommended_specialization
+            and not self.output_text
         ):
             raise ValidationError(
-                "Emergency cases should recommend specialization."
+                "Emergency response must contain output."
             )
 
-        # Edge Case 18:
-        # Completed should not have error
+        # Edge Case 23
         if (
             self.status == "completed"
             and self.error_message
         ):
             raise ValidationError(
-                "Completed interaction cannot have error message."
+                "Completed interaction cannot have error."
             )
 
-        # Edge Case 19:
-        # Failed should not have completion time
+        # Edge Case 24
         if (
             self.status == "failed"
             and self.completed_at
         ):
             raise ValidationError(
-                "Failed interaction cannot have completion time."
+                "Failed interaction cannot have completed_at."
+            )
+
+        # Edge Case 25
+        if (
+            self.tokens_used is not None
+            and self.tokens_used < 0
+        ):
+            raise ValidationError(
+                "Tokens cannot be negative."
+            )
+
+        # Edge Case 26
+        if (
+            self.recommended_specialization
+            and self.interaction_type not in
+            ["pre_visit", "specialist_recommendation"]
+        ):
+            raise ValidationError(
+                "Specialization recommendation invalid for this interaction type."
             )
 
     def save(self, *args, **kwargs):
@@ -301,6 +354,7 @@ class AIInteraction(models.Model):
             self.patient.user.first_name
             or self.patient.user.email
         )
+
         return (
             f"{patient_name} - "
             f"{self.interaction_type} - "

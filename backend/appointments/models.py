@@ -1,6 +1,6 @@
 from django.db import models
-from patients.models import PatientProfile
 from doctors.models import DoctorProfile
+from patients.models import PatientProfile
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from datetime import datetime
@@ -18,109 +18,69 @@ class AvailabilitySlot(models.Model):
     end_time = models.TimeField()
 
     class Meta:
-        unique_together = (
-            "doctor",
-            "date",
-            "start_time",
-            "end_time"
-        )
+        unique_together = ("doctor", "date", "start_time", "end_time")
 
     def clean(self):
 
-        # Edge Case 1: Past slot creation
+        # 1. Past date
         if self.date < timezone.localdate():
-            raise ValidationError(
-                "Cannot create slot for past dates."
-            )
+            raise ValidationError("Cannot create slot for past dates.")
 
-        # Edge Case 2: Same-day past time slot creation
+        # 2. Past time (same day)
         if self.date == timezone.localdate():
-            current_time = timezone.localtime().time()
+            if self.start_time <= timezone.localtime().time():
+                raise ValidationError("Cannot create slot in past time.")
 
-            if self.start_time <= current_time:
-                raise ValidationError(
-                    "Cannot create slot in past time."
-                )
-
-        # Edge Case 3: Invalid timing
+        # 3. Time validation
         if self.start_time >= self.end_time:
-            raise ValidationError(
-                "Start time must be before end time."
-            )
+            raise ValidationError("Start time must be before end time.")
 
-        # Edge Case 4: Doctor approval check
+        # 4. Doctor approval
         if self.doctor.approval_status != "approved":
-            raise ValidationError(
-                "Cannot create slots for unapproved doctor."
-            )
+            raise ValidationError("Doctor not approved.")
 
+        # 5. Availability check (FIXED SAFELY)
         weekday = self.date.strftime("%A").lower()
 
-        availability_qs = self.doctor.availabilities.filter(
-            day=weekday
-        )
+        availability_qs = self.doctor.availabilities.filter(day=weekday)
+
+        if not availability_qs.exists():
+            raise ValidationError("Doctor has no availability on this day.")
 
         valid = False
 
         for availability in availability_qs:
+
             if (
-                self.start_time >= availability.start_time
-                and self.end_time <= availability.end_time
+                self.start_time >= availability.start_time and
+                self.end_time <= availability.end_time
             ):
-                # Edge Case 5: Slot duration check
+
                 slot_minutes = (
-                    datetime.combine(self.date, self.end_time)
-                    - datetime.combine(self.date, self.start_time)
+                    datetime.combine(self.date, self.end_time) -
+                    datetime.combine(self.date, self.start_time)
                 ).seconds // 60
 
-                if slot_minutes != availability.slot_duration:
-                    raise ValidationError(
-                        "Slot duration does not match doctor's slot duration."
-                    )
+                if slot_minutes <= 0:
+                    raise ValidationError("Invalid slot duration.")
 
-                # Edge Case 6: Slot alignment check
-                availability_start = datetime.combine(
-                    self.date,
-                    availability.start_time
-                )
-
-                slot_start = datetime.combine(
-                    self.date,
-                    self.start_time
-                )
-
-                minutes_from_start = (
-                    slot_start - availability_start
-                ).seconds // 60
-
-                if (
-                    minutes_from_start
-                    % availability.slot_duration != 0
-                ):
-                    raise ValidationError(
-                        "Slot start time does not align with doctor slot duration."
-                    )
+                if slot_minutes % availability.slot_duration != 0:
+                    raise ValidationError("Slot duration mismatch.")
 
                 valid = True
                 break
 
         if not valid:
-            raise ValidationError(
-                "Slot is outside doctor availability."
-            )
+            raise ValidationError("Slot outside doctor availability.")
 
-        # Edge Case 7: Full-day leave
-        full_day_leave = self.doctor.leaves.filter(
+        # 6. Leave check
+        if self.doctor.leaves.filter(
             leave_date=self.date,
             is_full_day=True
-        ).exists()
+        ).exists():
+            raise ValidationError("Doctor on leave.")
 
-        if full_day_leave:
-            raise ValidationError(
-                "Doctor is on full-day leave."
-            )
-
-        # Edge Case 8: Partial leave overlap
+        # 7. Partial leave overlap
         partial_leaves = self.doctor.leaves.filter(
             leave_date=self.date,
             is_full_day=False
@@ -128,27 +88,23 @@ class AvailabilitySlot(models.Model):
 
         for leave in partial_leaves:
             if (
-                self.start_time < leave.end_time
-                and self.end_time > leave.start_time
+                self.start_time < leave.end_time and
+                self.end_time > leave.start_time
             ):
-                raise ValidationError(
-                    "Slot overlaps with doctor leave."
-                )
+                raise ValidationError("Slot overlaps leave.")
 
-        # Edge Case 9: Slot overlap with existing slot
-        overlapping_slots = AvailabilitySlot.objects.filter(
+        # 8. Slot overlap
+        overlapping = AvailabilitySlot.objects.filter(
             doctor=self.doctor,
             date=self.date
         ).exclude(id=self.id)
 
-        for slot in overlapping_slots:
+        for slot in overlapping:
             if (
-                self.start_time < slot.end_time
-                and self.end_time > slot.start_time
+                self.start_time < slot.end_time and
+                self.end_time > slot.start_time
             ):
-                raise ValidationError(
-                    "Slot overlaps with existing slot."
-                )
+                raise ValidationError("Slot overlaps existing slot.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -167,6 +123,7 @@ class AvailabilitySlot(models.Model):
 
 
 class Appointment(models.Model):
+
     STATUS_CHOICES = (
         ("scheduled", "Scheduled"),
         ("cancelled", "Cancelled"),
@@ -186,10 +143,7 @@ class Appointment(models.Model):
         related_name="appointments"
     )
 
-    reason = models.TextField(
-        null=True,
-        blank=True
-    )
+    reason = models.TextField(null=True, blank=True)
 
     status = models.CharField(
         max_length=20,
@@ -197,69 +151,56 @@ class Appointment(models.Model):
         default="scheduled"
     )
 
-    booked_at = models.DateTimeField(
-        auto_now_add=True
+    reschedule_count = models.PositiveIntegerField(default=0)
+
+    booked_at = models.DateTimeField(auto_now_add=True)
+
+    google_event_id = models.CharField(max_length=255, null=True, blank=True)
+    google_meet_link = models.URLField(null=True, blank=True)
+
+    calendar_sync_status = models.CharField(
+        max_length=20,
+        default="pending"
     )
 
-    updated_at = models.DateTimeField(
-        auto_now=True
-    )
+    updated_at = models.DateTimeField(auto_now=True)
 
     def clean(self):
 
-        # Edge Case 10: Patient role validation
+        # 1. Role check
         if self.patient.user.role != "patient":
-            raise ValidationError(
-                "Appointment can only be booked by patient."
-            )
+            raise ValidationError("Only patient can book.")
 
-        # Edge Case 11: Doctor approval check
+        # 2. Doctor approval
         if self.slot.doctor.approval_status != "approved":
-            raise ValidationError(
-                "Cannot book appointment with unapproved doctor."
-            )
+            raise ValidationError("Doctor not approved.")
 
-        # Edge Case 12: Past slot booking (date + time)
-        slot_datetime = datetime.combine(
-            self.slot.date,
-            self.slot.start_time
-        )
+        # 3. Past slot check (FIXED)
+        slot_dt = datetime.combine(self.slot.date, self.slot.start_time)
 
-        if timezone.is_naive(slot_datetime):
-            slot_datetime = timezone.make_aware(
-                slot_datetime
-            )
+        if timezone.is_naive(slot_dt):
+            slot_dt = timezone.make_aware(slot_dt)
 
-        if slot_datetime < timezone.now():
-            raise ValidationError(
-                "Cannot book past slot."
-            )
+        if slot_dt < timezone.now():
+            raise ValidationError("Cannot book past slot.")
 
-        # Edge Case 13: Double booking
+        # 4. Double booking (SAFE)
         existing = Appointment.objects.filter(
             slot=self.slot,
             status="scheduled"
         )
 
         if self.pk:
-            existing = existing.exclude(
-                pk=self.pk
-            )
+            existing = existing.exclude(pk=self.pk)
 
         if existing.exists():
-            raise ValidationError(
-                "Slot already booked."
-            )
+            raise ValidationError("Slot already booked.")
 
-        # Edge Case 14: Completed / no-show immutable
+        # 5. Immutable check
         if self.pk:
             old = Appointment.objects.get(pk=self.pk)
-
-            if old.status in ["completed", "no_show"]:
-                if old.status != self.status:
-                    raise ValidationError(
-                        "Completed or no-show appointments cannot be modified."
-                    )
+            if old.status in ["completed", "no_show"] and old.status != self.status:
+                raise ValidationError("Cannot modify completed/no-show.")
 
     def save(self, *args, **kwargs):
         self.full_clean()

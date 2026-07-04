@@ -1,5 +1,17 @@
 from django.contrib import admin
-from .models import DoctorProfile
+from .models import (
+    Specialization,
+    DoctorProfile,
+    DoctorAvailability,
+    DoctorLeave
+)
+
+
+@admin.register(Specialization)
+class SpecializationAdmin(admin.ModelAdmin):
+    list_display = ("id", "name")
+    search_fields = ("name",)
+
 
 @admin.register(DoctorProfile)
 class DoctorProfileAdmin(admin.ModelAdmin):
@@ -20,10 +32,32 @@ class DoctorProfileAdmin(admin.ModelAdmin):
     search_fields = (
         "full_name",
         "license_number",
-        "clinic_name"
+        "user__email"
     )
 
-    def save_model(self, request, obj, form, change):
-        if obj.approval_status == "approved":
-            obj.approved_by = request.user
-        super().save_model(request, obj, form, change)
+
+@admin.register(DoctorAvailability)
+class DoctorAvailabilityAdmin(admin.ModelAdmin):
+    list_display = (
+        "doctor",
+        "day",
+        "start_time",
+        "end_time",
+        "slot_duration"
+    )
+
+    list_filter = ("day",)
+
+
+@admin.register(DoctorLeave)
+class DoctorLeaveAdmin(admin.ModelAdmin):
+    list_display = (
+        "doctor",
+        "leave_date",
+        "is_full_day"
+    )
+
+    list_filter = (
+        "leave_date",
+        "is_full_day"
+    )
